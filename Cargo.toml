@@ -1,0 +1,10 @@
+[package]
+name = "bonfire"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+redis = { version = "0.21.2", features = ["async-std-comp"] }
+async-tungstenite = { version = "0.16.1", features = ["async-std-runtime"] }
