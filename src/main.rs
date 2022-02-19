@@ -13,7 +13,7 @@ async fn main() {
     revolt_quark::setup_logging();
     database::connect().await;
 
-    let bind = env::var("HOST").unwrap_or_else(|_| "0.0.0.0:7000".into());
+    let bind = env::var("HOST").unwrap_or_else(|_| "0.0.0.0:9000".into());
     let try_socket = TcpListener::bind(bind).await;
     let listener = try_socket.expect("Failed to bind");
 

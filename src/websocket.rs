@@ -8,6 +8,7 @@ use futures::{
 use revolt_quark::{
     events::{
         client::EventV1,
+        server::ClientMessage,
         state::{State, SubscriptionStateChange},
     },
     redis_kiss, Database,
@@ -91,7 +92,15 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
 
                 // Authenticate user.
                 if config.session_token.is_none() {
-                    // TODO: get token
+                    'outer: while let Ok(message) = read.try_next().await {
+                        if let Message::Text(text) = message.unwrap() {
+                            let msg: ClientMessage = serde_json::from_str(&text).unwrap();
+                            if let ClientMessage::Authenticate { token } = msg {
+                                config.session_token = Some(token);
+                                break 'outer;
+                            }
+                        }
+                    }
                 }
 
                 match db
@@ -99,6 +108,8 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                     .await
                 {
                     Ok(user) => {
+                        info!("User {addr:?} authenticated as @{}", user.username);
+
                         // Create local state.
                         let mut state = State::from(user);
 
@@ -110,84 +121,94 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                             .await
                             .ok();
 
-                        // Send Ready payload.
-                        let ready_payload = state.generate_ready_payload(db).await;
+                        // Download required data to local cache and send Ready payload.
+                        if let Ok(ready_payload) = state.generate_ready_payload(db).await {
+                            write
+                                .send(Message::Text(
+                                    serde_json::to_string(&ready_payload).unwrap(),
+                                ))
+                                .await
+                                .ok();
 
-                        write
-                            .send(Message::Text(
-                                serde_json::to_string(&ready_payload).unwrap(),
-                            ))
-                            .await
-                            .ok();
-
-                        // Create a PubSub connection to poll on.
-                        let listener = async {
-                            if let Ok(mut conn) = redis_kiss::open_pubsub_connection().await {
-                                loop {
-                                    // Check for state changes for subscriptions.
-                                    match state.apply_state() {
-                                        SubscriptionStateChange::Reset => {
-                                            for id in state.iter_subscriptions() {
-                                                conn.subscribe(id).await.unwrap();
+                            // Create a PubSub connection to poll on.
+                            let listener = async {
+                                if let Ok(mut conn) = redis_kiss::open_pubsub_connection().await {
+                                    loop {
+                                        // Check for state changes for subscriptions.
+                                        match state.apply_state() {
+                                            SubscriptionStateChange::Reset => {
+                                                for id in state.iter_subscriptions() {
+                                                    conn.subscribe(id).await.unwrap();
+                                                }
                                             }
+                                            SubscriptionStateChange::Change { add, remove } => {
+                                                for id in remove {
+                                                    conn.unsubscribe(id).await.unwrap();
+                                                }
+
+                                                for id in add {
+                                                    conn.subscribe(id).await.unwrap();
+                                                }
+                                            }
+                                            SubscriptionStateChange::None => {}
                                         }
-                                        SubscriptionStateChange::Change { add, remove } => {
-                                            for id in remove {
-                                                conn.unsubscribe(id).await.unwrap();
-                                            }
 
-                                            for id in add {
-                                                conn.subscribe(id).await.unwrap();
-                                            }
-                                        }
-                                        SubscriptionStateChange::None => {}
-                                    }
+                                        // Debug logging of current subscriptions.
+                                        #[cfg(debug_assertions)]
+                                        info!(
+                                            "User {addr:?} is subscribed to {:?}",
+                                            state.iter_subscriptions().collect::<Vec<&String>>()
+                                        );
 
-                                    // Handle incoming events.
-                                    if let Some((channel, item)) =
-                                        conn.on_message().next().await.map(|item| {
-                                            (
-                                                item.get_channel_name().to_string(),
-                                                redis_kiss::decode_payload::<EventV1>(&item),
-                                            )
-                                        })
-                                    {
-                                        if let Ok(mut event) = item {
-                                            state.handle_incoming_event_v1(db, &mut event).await;
-
-                                            if write
-                                                .send(Message::Text(
-                                                    serde_json::to_string(&event).unwrap(),
-                                                ))
-                                                .await
-                                                .is_err()
-                                            {
-                                                break;
+                                        // Handle incoming events.
+                                        if let Some((channel, item)) =
+                                            conn.on_message().next().await.map(|item| {
+                                                (
+                                                    item.get_channel_name().to_string(),
+                                                    redis_kiss::decode_payload::<EventV1>(&item),
+                                                )
+                                            })
+                                        {
+                                            if let Ok(mut event) = item {
+                                                if state
+                                                    .handle_incoming_event_v1(db, &mut event)
+                                                    .await
+                                                    && write
+                                                        .send(Message::Text(
+                                                            serde_json::to_string(&event).unwrap(),
+                                                        ))
+                                                        .await
+                                                        .is_err()
+                                                {
+                                                    break;
+                                                }
+                                            } else {
+                                                warn!(
+                                                    "Failed to deserialise an event for {channel}!"
+                                                );
                                             }
-                                        } else {
-                                            warn!("Failed to deserialise an event for {channel}!");
                                         }
                                     }
                                 }
                             }
+                            .fuse();
+
+                            // Read from WebSocket stream.
+                            let worker =
+                                async { while let Ok(Some(_)) = read.try_next().await {} }.fuse();
+
+                            // Pin both tasks.
+                            pin_mut!(listener, worker);
+
+                            // Wait for either disconnect or for listener to die.
+                            select!(
+                                () = listener => {},
+                                () = worker => {}
+                            );
+
+                            // Combine the streams back once we are ready to disconnect.
+                            /* ws = read.reunite(write).unwrap(); */
                         }
-                        .fuse();
-
-                        // Read from WebSocket stream.
-                        let worker =
-                            async { while let Ok(Some(_)) = read.try_next().await {} }.fuse();
-
-                        // Pin both tasks.
-                        pin_mut!(listener, worker);
-
-                        // Wait for either disconnect or for listener to die.
-                        select!(
-                            () = listener => {},
-                            () = worker => {}
-                        );
-
-                        // Combine the streams back once we are ready to disconnect.
-                        /* ws = read.reunite(write).unwrap(); */
                     }
                     Err(err) => {
                         write
