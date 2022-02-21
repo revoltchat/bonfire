@@ -8,6 +8,7 @@ use revolt_quark::{
         server::ClientMessage,
         state::{State, SubscriptionStateChange},
     },
+    presence::{presence_create_session, presence_delete_session},
     redis_kiss, Database,
 };
 
@@ -59,6 +60,9 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                         // Create local state.
                         let mut state = State::from(user);
                         let user_id = state.cache.user_id.clone();
+
+                        // Create presence session.
+                        let session_id = presence_create_session(&user_id, 0).await;
 
                         // Notify socket we have authenticated.
                         write
@@ -187,9 +191,12 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                 () = worker => {}
                             );
 
-                            // Combine the streams back once we are ready to disconnect.
+                            // * Combine the streams back once we are ready to disconnect.
                             /* ws = read.reunite(write).unwrap(); */
                         }
+
+                        // Clean up presence session.
+                        presence_delete_session(&user_id, session_id).await;
                     }
                     Err(err) => {
                         write.send(config.encode(&err)).await.ok();
@@ -197,7 +204,7 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                 }
             }
 
-            // Disconnect the WebSocket if it isn't already.
+            // * Disconnect the WebSocket if it isn't already.
             /*ws.close(Some(CloseFrame {
                 code: CloseCode::Normal,
                 reason: std::borrow::Cow::from(""),
