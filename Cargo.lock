@@ -452,6 +452,8 @@ dependencies = [
  "once_cell",
  "querystring",
  "revolt-quark",
+ "rmp-serde",
+ "serde",
  "serde_json",
 ]
 

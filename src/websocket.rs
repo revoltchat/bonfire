@@ -1,10 +1,7 @@
 use std::net::SocketAddr;
 
-use async_tungstenite::tungstenite::{handshake, Message};
-use futures::{
-    channel::oneshot::{self, Sender},
-    pin_mut, select, FutureExt, SinkExt, StreamExt, TryStreamExt,
-};
+use async_tungstenite::tungstenite::Message;
+use futures::{channel::oneshot, pin_mut, select, FutureExt, SinkExt, StreamExt, TryStreamExt};
 use revolt_quark::{
     events::{
         client::EventV1,
@@ -14,97 +11,46 @@ use revolt_quark::{
     redis_kiss, Database,
 };
 
-use async_std::{net::TcpStream, task};
+use async_std::{channel, net::TcpStream, task};
 
-#[derive(Debug)]
-struct ProtocolConfiguration {
-    protocol_version: i32,
-    format: String,
-    session_token: Option<String>,
-}
-
-struct Callback {
-    sender: Sender<ProtocolConfiguration>,
-}
-
-impl handshake::server::Callback for Callback {
-    fn on_request(
-        self,
-        request: &handshake::server::Request,
-        response: handshake::server::Response,
-    ) -> Result<handshake::server::Response, handshake::server::ErrorResponse> {
-        let query = request.uri().query().unwrap_or_default();
-        let params = querystring::querify(query);
-
-        let mut protocol_version = 1;
-        let mut format = "json".into();
-        let mut session_token = None;
-
-        for (key, value) in params {
-            match key {
-                "version" => {
-                    if let Ok(version) = value.parse() {
-                        protocol_version = version;
-                    }
-                }
-                "format" => match value {
-                    // ! FIXME: support msgpack
-                    "json" | "msgpack" => format = value.into(),
-                    _ => {}
-                },
-                "token" => session_token = Some(value.into()),
-                _ => {}
-            }
-        }
-
-        if self
-            .sender
-            .send(ProtocolConfiguration {
-                protocol_version,
-                format,
-                session_token,
-            })
-            .is_ok()
-        {
-            Ok(response)
-        } else {
-            Err(handshake::server::ErrorResponse::new(None))
-        }
-    }
-}
+use crate::config::WebsocketHandshakeCallback;
 
 pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) {
     task::spawn(async move {
         info!("User connected from {addr:?}");
 
         let (sender, receiver) = oneshot::channel();
-        if let Ok(ws) =
-            async_tungstenite::accept_hdr_async_with_config(stream, Callback { sender }, None).await
+        if let Ok(ws) = async_tungstenite::accept_hdr_async_with_config(
+            stream,
+            WebsocketHandshakeCallback::from(sender),
+            None,
+        )
+        .await
         {
             if let Ok(mut config) = receiver.await {
                 info!(
-                    "User {addr:?} provided protocol configuration (version = {}, format = {})",
-                    config.protocol_version, config.format
+                    "User {addr:?} provided protocol configuration (version = {}, format = {:?})",
+                    config.get_protocol_version(),
+                    config.get_protocol_format()
                 );
 
                 // Split the socket for simultaneously read and write.
                 let (mut write, mut read) = ws.split();
 
                 // Authenticate user.
-                if config.session_token.is_none() {
+                if config.get_session_token().is_none() {
                     'outer: while let Ok(message) = read.try_next().await {
-                        if let Message::Text(text) = message.unwrap() {
-                            let msg: ClientMessage = serde_json::from_str(&text).unwrap();
-                            if let ClientMessage::Authenticate { token } = msg {
-                                config.session_token = Some(token);
-                                break 'outer;
-                            }
+                        let msg = config.decode(message.as_ref().unwrap()).unwrap();
+
+                        if let ClientMessage::Authenticate { token } = msg {
+                            config.set_session_token(token);
+                            break 'outer;
                         }
                     }
                 }
 
                 match db
-                    .fetch_user_by_token(config.session_token.as_ref().unwrap())
+                    .fetch_user_by_token(config.get_session_token().as_ref().unwrap())
                     .await
                 {
                     Ok(user) => {
@@ -112,23 +58,26 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
 
                         // Create local state.
                         let mut state = State::from(user);
+                        let user_id = state.cache.user_id.clone();
 
                         // Notify socket we have authenticated.
                         write
-                            .send(Message::Text(
-                                serde_json::to_string(&EventV1::Authenticated).unwrap(),
-                            ))
+                            .send(config.encode(&EventV1::Authenticated))
                             .await
                             .ok();
 
                         // Download required data to local cache and send Ready payload.
                         if let Ok(ready_payload) = state.generate_ready_payload(db).await {
-                            write
-                                .send(Message::Text(
-                                    serde_json::to_string(&ready_payload).unwrap(),
-                                ))
-                                .await
-                                .ok();
+                            write.send(config.encode(&ready_payload)).await.ok();
+
+                            // Write channel to WebSocket.
+                            let (send, mut recv) = channel::unbounded::<Message>();
+                            let socket_worker = async {
+                                while let Some(msg) = recv.next().await {
+                                    write.send(msg).await.ok();
+                                }
+                            }
+                            .fuse();
 
                             // Create a PubSub connection to poll on.
                             let listener = async {
@@ -173,10 +122,8 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                                 if state
                                                     .handle_incoming_event_v1(db, &mut event)
                                                     .await
-                                                    && write
-                                                        .send(Message::Text(
-                                                            serde_json::to_string(&event).unwrap(),
-                                                        ))
+                                                    && send
+                                                        .send(config.encode(&event))
                                                         .await
                                                         .is_err()
                                                 {
@@ -194,14 +141,48 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                             .fuse();
 
                             // Read from WebSocket stream.
-                            let worker =
-                                async { while let Ok(Some(_)) = read.try_next().await {} }.fuse();
+                            let worker = async {
+                                while let Ok(Some(msg)) = read.try_next().await {
+                                    if let Ok(payload) = config.decode(&msg) {
+                                        match payload {
+                                            ClientMessage::BeginTyping { channel } => {
+                                                EventV1::ChannelStartTyping {
+                                                    id: channel.clone(),
+                                                    user: user_id.clone(),
+                                                }
+                                                .p(channel.clone())
+                                                .await;
+                                            }
+                                            ClientMessage::EndTyping { channel } => {
+                                                EventV1::ChannelStopTyping {
+                                                    id: channel.clone(),
+                                                    user: user_id.clone(),
+                                                }
+                                                .p(channel.clone())
+                                                .await;
+                                            }
+                                            ClientMessage::Ping { data, responded } => {
+                                                if responded.is_none() {
+                                                    send.send(
+                                                        config.encode(&EventV1::Pong { data }),
+                                                    )
+                                                    .await
+                                                    .ok();
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            .fuse();
 
                             // Pin both tasks.
-                            pin_mut!(listener, worker);
+                            pin_mut!(socket_worker, listener, worker);
 
                             // Wait for either disconnect or for listener to die.
                             select!(
+                                () = socket_worker => {},
                                 () = listener => {},
                                 () = worker => {}
                             );
@@ -211,10 +192,7 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                         }
                     }
                     Err(err) => {
-                        write
-                            .send(Message::Text(serde_json::to_string(&err).unwrap()))
-                            .await
-                            .ok();
+                        write.send(config.encode(&err)).await.ok();
                     }
                 }
             }

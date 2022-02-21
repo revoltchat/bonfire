@@ -5,6 +5,8 @@ use async_std::net::TcpListener;
 #[macro_use]
 extern crate log;
 
+pub mod config;
+
 mod database;
 mod websocket;
 
