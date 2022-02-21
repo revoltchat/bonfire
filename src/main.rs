@@ -1,6 +1,7 @@
 use std::env;
 
 use async_std::net::TcpListener;
+use revolt_quark::presence::presence_clear_region;
 
 #[macro_use]
 extern crate log;
@@ -15,6 +16,9 @@ async fn main() {
     // Configure requirements for Bonfire.
     revolt_quark::setup_logging();
     database::connect().await;
+
+    // Clean up the current region information.
+    presence_clear_region(None).await;
 
     // Setup a TCP listener to accept WebSocket connections on.
     // By default, we bind to port 9000 on all interfaces.
