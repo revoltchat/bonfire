@@ -3,6 +3,7 @@ use revolt_quark::{Database, DatabaseInfo};
 
 static DBCONN: OnceCell<Database> = OnceCell::new();
 
+/// Connect Bonfire to the database.
 pub async fn connect() {
     let database = DatabaseInfo::MongoDb("mongodb://localhost")
         .connect()
@@ -12,6 +13,7 @@ pub async fn connect() {
     DBCONN.set(database).unwrap();
 }
 
+/// Get a reference to the current database.
 pub fn get_db() -> &'static Database {
-    DBCONN.get().unwrap()
+    DBCONN.get().expect("Valid `Database`")
 }

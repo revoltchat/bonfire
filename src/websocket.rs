@@ -16,10 +16,16 @@ use async_std::{channel, net::TcpStream, task};
 
 use crate::config::WebsocketHandshakeCallback;
 
+/// Spawn a new WebSocket client worker given access to the database,
+/// the relevant TCP stream and the remote address of the client.
 pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) {
+    // Spawn a new Async task to work on.
     task::spawn(async move {
         info!("User connected from {addr:?}");
 
+        // Upgrade the TCP connection to a WebSocket connection.
+        // In this process, we also parse any additional parameters given.
+        // e.g. wss://example.com?format=json&version=1
         let (sender, receiver) = oneshot::channel();
         if let Ok(ws) = async_tungstenite::accept_hdr_async_with_config(
             stream,
@@ -28,6 +34,7 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
         )
         .await
         {
+            // Verify we've received a valid config, otherwise we should just drop the connection.
             if let Ok(mut config) = receiver.await {
                 info!(
                     "User {addr:?} provided protocol configuration (version = {}, format = {:?})",
