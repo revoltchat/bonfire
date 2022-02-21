@@ -1,6 +1,5 @@
 use std::net::SocketAddr;
 
-use async_tungstenite::tungstenite::Message;
 use futures::{channel::oneshot, pin_mut, select, FutureExt, SinkExt, StreamExt, TryStreamExt};
 use revolt_quark::{
     events::{
@@ -12,7 +11,7 @@ use revolt_quark::{
     redis_kiss, Database,
 };
 
-use async_std::{channel, net::TcpStream, task};
+use async_std::{net::TcpStream, sync::Mutex, task};
 
 use crate::config::WebsocketHandshakeCallback;
 
@@ -43,7 +42,8 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                 );
 
                 // Split the socket for simultaneously read and write.
-                let (mut write, mut read) = ws.split();
+                let (write, mut read) = ws.split();
+                let write = Mutex::new(write);
 
                 // If the user has not provided authentication, request information.
                 if config.get_session_token().is_none() {
@@ -68,26 +68,30 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                             let user_id = state.cache.user_id.clone();
 
                             // Create presence session.
-                            let session_id = presence_create_session(&user_id, 0).await;
+                            let (first_session, session_id) =
+                                presence_create_session(&user_id, 0).await;
 
                             // Notify socket we have authenticated.
                             write
+                                .lock()
+                                .await
                                 .send(config.encode(&EventV1::Authenticated))
                                 .await
                                 .ok();
 
                             // Download required data to local cache and send Ready payload.
                             if let Ok(ready_payload) = state.generate_ready_payload(db).await {
-                                write.send(config.encode(&ready_payload)).await.ok();
+                                write
+                                    .lock()
+                                    .await
+                                    .send(config.encode(&ready_payload))
+                                    .await
+                                    .ok();
 
-                                // Write channel to WebSocket.
-                                let (send, mut recv) = channel::unbounded::<Message>();
-                                let socket_worker = async {
-                                    while let Some(msg) = recv.next().await {
-                                        write.send(msg).await.ok();
-                                    }
+                                // If this was the first session, notify other users that we just went online.
+                                if first_session {
+                                    state.broadcast_presence_change(true).await;
                                 }
-                                .fuse();
 
                                 // Create a PubSub connection to poll on.
                                 let listener = async {
@@ -113,7 +117,7 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                                 SubscriptionStateChange::None => {}
                                             }
 
-                                            // Debug logging of current subscriptions.
+                                            // * Debug logging of current subscriptions.
                                             #[cfg(debug_assertions)]
                                             info!(
                                                 "User {addr:?} is subscribed to {:?}",
@@ -136,7 +140,7 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                                                 db, &mut event,
                                                             )
                                                             .await
-                                                            && send
+                                                            && write.lock().await
                                                                 .send(config.encode(&event))
                                                                 .await
                                                                 .is_err()
@@ -144,9 +148,7 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                                             break;
                                                         }
                                                     } else {
-                                                        warn!(
-                                                    "Failed to deserialise an event for {channel}!"
-                                                );
+                                                        warn!("Failed to deserialise an event for {channel}!");
                                                     }
                                                 }
                                                 // No more data, assume we disconnected or otherwise
@@ -159,48 +161,51 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                 .fuse();
 
                                 // Read from WebSocket stream.
-                                let worker = async {
-                                    while let Ok(Some(msg)) = read.try_next().await {
-                                        if let Ok(payload) = config.decode(&msg) {
-                                            match payload {
-                                                ClientMessage::BeginTyping { channel } => {
-                                                    EventV1::ChannelStartTyping {
-                                                        id: channel.clone(),
-                                                        user: user_id.clone(),
+                                let worker =
+                                    async {
+                                        while let Ok(Some(msg)) = read.try_next().await {
+                                            if let Ok(payload) = config.decode(&msg) {
+                                                match payload {
+                                                    ClientMessage::BeginTyping { channel } => {
+                                                        EventV1::ChannelStartTyping {
+                                                            id: channel.clone(),
+                                                            user: user_id.clone(),
+                                                        }
+                                                        .p(channel.clone())
+                                                        .await;
                                                     }
-                                                    .p(channel.clone())
-                                                    .await;
-                                                }
-                                                ClientMessage::EndTyping { channel } => {
-                                                    EventV1::ChannelStopTyping {
-                                                        id: channel.clone(),
-                                                        user: user_id.clone(),
+                                                    ClientMessage::EndTyping { channel } => {
+                                                        EventV1::ChannelStopTyping {
+                                                            id: channel.clone(),
+                                                            user: user_id.clone(),
+                                                        }
+                                                        .p(channel.clone())
+                                                        .await;
                                                     }
-                                                    .p(channel.clone())
-                                                    .await;
-                                                }
-                                                ClientMessage::Ping { data, responded } => {
-                                                    if responded.is_none() {
-                                                        send.send(
-                                                            config.encode(&EventV1::Pong { data }),
-                                                        )
-                                                        .await
-                                                        .ok();
+                                                    ClientMessage::Ping { data, responded } => {
+                                                        if responded.is_none() {
+                                                            write
+                                                                .lock()
+                                                                .await
+                                                                .send(config.encode(
+                                                                    &EventV1::Pong { data },
+                                                                ))
+                                                                .await
+                                                                .ok();
+                                                        }
                                                     }
+                                                    _ => {}
                                                 }
-                                                _ => {}
                                             }
                                         }
                                     }
-                                }
-                                .fuse();
+                                    .fuse();
 
                                 // Pin both tasks.
-                                pin_mut!(socket_worker, listener, worker);
+                                pin_mut!(listener, worker);
 
                                 // Wait for either disconnect or for listener to die.
                                 select!(
-                                    () = socket_worker => {},
                                     () = listener => {},
                                     () = worker => {}
                                 );
@@ -210,10 +215,15 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                             }
 
                             // Clean up presence session.
-                            presence_delete_session(&user_id, session_id).await;
+                            let last_session = presence_delete_session(&user_id, session_id).await;
+
+                            // If this was the last session, notify other users that we just went offline.
+                            if last_session {
+                                state.broadcast_presence_change(false).await;
+                            }
                         }
                         Err(err) => {
-                            write.send(config.encode(&err)).await.ok();
+                            write.lock().await.send(config.encode(&err)).await.ok();
                         }
                     }
                 }
