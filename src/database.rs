@@ -5,7 +5,7 @@ static DBCONN: OnceCell<Database> = OnceCell::new();
 
 /// Connect Bonfire to the database.
 pub async fn connect() {
-    let database = DatabaseInfo::MongoDb("mongodb://localhost")
+    let database = DatabaseInfo::Auto
         .connect()
         .await
         .expect("Failed to connect to the database.");
