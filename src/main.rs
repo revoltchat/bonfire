@@ -23,6 +23,7 @@ async fn main() {
     // Setup a TCP listener to accept WebSocket connections on.
     // By default, we bind to port 9000 on all interfaces.
     let bind = env::var("HOST").unwrap_or_else(|_| "0.0.0.0:9000".into());
+    info!("Listening on host {bind}");
     let try_socket = TcpListener::bind(bind).await;
     let listener = try_socket.expect("Failed to bind");
 
