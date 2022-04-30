@@ -7,6 +7,7 @@ use revolt_quark::{
         server::ClientMessage,
         state::{State, SubscriptionStateChange},
     },
+    models::{user::UserHint, User},
     presence::{presence_create_session, presence_delete_session},
     redis_kiss, Database,
 };
@@ -59,7 +60,7 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
 
                 // Try to authenticate the user.
                 if let Some(token) = config.get_session_token().as_ref() {
-                    match db.fetch_user_by_token(token).await {
+                    match User::from_token(db, token, UserHint::Any).await {
                         Ok(user) => {
                             info!("User {addr:?} authenticated as @{}", user.username);
 
