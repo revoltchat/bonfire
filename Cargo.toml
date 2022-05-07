@@ -14,7 +14,7 @@ once_cell = "1.9.0"
 querystring = "1.1.0"
 
 # quark
-revolt-quark = { git = "https://github.com/revoltchat/quark", rev = "e5e8cae091eb7220cd37837494ece966e28cbe81" }
+revolt-quark = { git = "https://github.com/revoltchat/quark", rev = "e0ac2fe6c1ed4c874bb39cdd119958ee7f8d0c02" }
 # revolt-quark = { path = "../quark" }
 
 # serde
