@@ -105,13 +105,22 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                                     for id in state.iter_subscriptions() {
                                                         conn.subscribe(id).await.unwrap();
                                                     }
+
+                                                    #[cfg(debug_assertions)]
+                                                    info!("{addr:?} has reset their subscriptions");
                                                 }
                                                 SubscriptionStateChange::Change { add, remove } => {
                                                     for id in remove {
+                                                        #[cfg(debug_assertions)]
+                                                        info!("{addr:?} unsubscribing from {id}");
+
                                                         conn.unsubscribe(id).await.unwrap();
                                                     }
 
                                                     for id in add {
+                                                        #[cfg(debug_assertions)]
+                                                        info!("{addr:?} subscribing to {id}");
+
                                                         conn.subscribe(id).await.unwrap();
                                                     }
                                                 }
@@ -119,13 +128,13 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                                             }
 
                                             // * Debug logging of current subscriptions.
-                                            #[cfg(debug_assertions)]
+                                            /*#[cfg(debug_assertions)]
                                             info!(
                                                 "User {addr:?} is subscribed to {:?}",
                                                 state
                                                     .iter_subscriptions()
                                                     .collect::<Vec<&String>>()
-                                            );
+                                            );*/
 
                                             // Handle incoming events.
                                             match conn.on_message().next().await.map(|item| {
