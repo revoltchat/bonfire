@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "bonfire"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-std",
  "async-tungstenite",
@@ -2863,7 +2863,7 @@ dependencies = [
 [[package]]
 name = "revolt-quark"
 version = "0.1.0"
-source = "git+https://github.com/revoltchat/quark?rev=f76fd95aecbf7db3321cf2b33dead6defeb4e220#f76fd95aecbf7db3321cf2b33dead6defeb4e220"
+source = "git+https://github.com/revoltchat/quark?rev=45706b93d4da11cf3e0f3ca41514c73945bb348d#45706b93d4da11cf3e0f3ca41514c73945bb348d"
 dependencies = [
  "async-recursion",
  "async-std",
