@@ -14,7 +14,7 @@ mod websocket;
 #[async_std::main]
 async fn main() {
     // Configure requirements for Bonfire.
-    revolt_quark::setup_logging();
+    let _guard = revolt_quark::setup_logging();
     database::connect().await;
 
     // Clean up the current region information.
