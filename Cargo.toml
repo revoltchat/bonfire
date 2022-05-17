@@ -1,6 +1,6 @@
 [package]
 name = "bonfire"
-version = "0.1.4"
+version = "1.0.5"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -14,7 +14,7 @@ once_cell = "1.9.0"
 querystring = "1.1.0"
 
 # quark
-revolt-quark = { git = "https://github.com/revoltchat/quark", rev = "d16dc5f92ea0d9ad6ada829f3b68408a8fa5d442" }
+revolt-quark = { git = "https://github.com/revoltchat/quark", rev = "9e6969525ec6c4e5523a4751664c5114d5d59f34" }
 # revolt-quark = { path = "../quark" }
 
 # serde
