@@ -10,7 +10,7 @@ pub async fn connect() {
         .await
         .expect("Failed to connect to the database.");
 
-    DBCONN.set(database).unwrap();
+    DBCONN.set(database).expect("Setting `Database`");
 }
 
 /// Get a reference to the current database.

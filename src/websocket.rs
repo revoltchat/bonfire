@@ -49,9 +49,9 @@ pub fn spawn_client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
                 // If the user has not provided authentication, request information.
                 if config.get_session_token().is_none() {
                     'outer: while let Ok(message) = read.try_next().await {
-                        let msg = config.decode(message.as_ref().unwrap()).unwrap();
-
-                        if let ClientMessage::Authenticate { token } = msg {
+                        if let Ok(ClientMessage::Authenticate { token }) =
+                            config.decode(message.as_ref().unwrap())
+                        {
                             config.set_session_token(token);
                             break 'outer;
                         }
